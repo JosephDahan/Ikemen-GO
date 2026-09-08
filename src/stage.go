@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"math"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -1976,6 +1977,69 @@ func (s *Stage) destroy() {
 			b.video.Close()
 		}
 	}
+}
+
+// swapStageLive replaces the active stage without restarting the round or
+// mutating character state. The new stage is fully loaded before the old stage
+// is released, so a load failure leaves the running match intact.
+func (s *System) swapStageLive(def string) error {
+	if strings.TrimSpace(def) == "" {
+		return Error("empty stage definition")
+	}
+	if s.stage == nil {
+		return Error("no active stage")
+	}
+
+	oldStage := s.stage
+	oldDef := oldStage.def
+	if strings.EqualFold(filepath.Clean(oldDef), filepath.Clean(def)) {
+		return nil
+	}
+
+	nextStage, err := loadStage(def, true)
+	if err != nil {
+		return fmt.Errorf("load %s: %w", def, err)
+	}
+	nextStage.updateLocalScale(s.gameWidth)
+	nextStage.reset()
+
+	s.stage = nextStage
+	if s.stageList == nil {
+		s.stageList = make(map[int32]*Stage)
+	}
+	for ref, stage := range s.stageList {
+		if stage == oldStage {
+			s.stageList[ref] = nextStage
+		}
+	}
+	s.stageList[0] = nextStage
+	s.stageLoop = false
+
+	s.cam.stageCamera = nextStage.stageCamera
+	s.cam.Init()
+	s.updateMusicMaps()
+
+	track, loop, volume, loopstart, loopend, startposition, freqmul, loopcount :=
+		nextStage.music.Read("", nextStage.def)
+	if track == "" {
+		s.bgm.Stop()
+	} else {
+		s.bgm.Open(track, loop, volume, loopstart, loopend, startposition, freqmul, loopcount)
+	}
+	s.playBgmFlg = true
+
+	if nextStage.model != nil {
+		s.mainThreadTask <- func() {
+			gfx.SetModelVertexData(0, nextStage.model.vertexBuffer)
+			gfx.SetModelIndexData(0, nextStage.model.elementBuffer...)
+		}
+	}
+	oldStage.destroy()
+
+	if automationEnabled() {
+		recordAutomationEvent("stage_swap", oldDef+" -> "+nextStage.def)
+	}
+	return nil
 }
 
 func (s *Stage) warn() string {

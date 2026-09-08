@@ -5,9 +5,54 @@ import (
 	"image"
 	"image/draw"
 	"runtime"
+	"time"
 
 	"github.com/veandco/go-sdl2/sdl"
 )
+
+// deferredKeyRelease preserves a very short tap across IKEMEN's event polls.
+// Wall-clock time is used because the engine may poll SDL many times before a
+// Lua menu or command buffer samples sys.keyState.
+type deferredKeyRelease struct {
+	mod       ModifierKey
+	releaseAt time.Time
+}
+
+const syntheticTapHoldDuration = 250 * time.Millisecond
+
+var deferredKeyReleases = make(map[Key]deferredKeyRelease)
+var deferredLuaKeyInput = KeyUnknown
+var deferredLuaKeyInputUntil time.Time
+
+func rememberDeferredLuaKeyInput(key Key) {
+	if key == KeyUnknown {
+		return
+	}
+	deferredLuaKeyInput = key
+	deferredLuaKeyInputUntil = time.Now().Add(syntheticTapHoldDuration)
+}
+
+// peekDeferredLuaKeyInput exposes a same-poll synthetic tap to Lua until one
+// matching getKey call consumes it. Non-matching getKey comparisons must not
+// consume the latch because menus often test several shortcut keys in order.
+func peekDeferredLuaKeyInput() Key {
+	if deferredLuaKeyInput == KeyUnknown {
+		return KeyUnknown
+	}
+	if !time.Now().Before(deferredLuaKeyInputUntil) {
+		deferredLuaKeyInput = KeyUnknown
+		deferredLuaKeyInputUntil = time.Time{}
+		return KeyUnknown
+	}
+	return deferredLuaKeyInput
+}
+
+func consumeDeferredLuaKeyInput(key Key) {
+	if deferredLuaKeyInput == key {
+		deferredLuaKeyInput = KeyUnknown
+		deferredLuaKeyInputUntil = time.Time{}
+	}
+}
 
 type Window struct {
 	*sdl.Window
@@ -362,6 +407,17 @@ func (w *Window) UpdateDebugFPS() {
 }
 
 func (w *Window) pollEvents() {
+	// Keep same-poll taps alive long enough to cross IKEMEN's intermediate
+	// keepAlive/event polls and reach at least one menu or command sample.
+	now := time.Now()
+	for key, release := range deferredKeyReleases {
+		if !now.Before(release.releaseAt) {
+			OnKeyReleased(key, release.mod)
+			delete(deferredKeyReleases, key)
+		}
+	}
+	pollAutomationCommands()
+
 	for event := sdl.PollEvent(); event != nil; event = sdl.PollEvent() {
 		switch t := event.(type) {
 		case sdl.ControllerAxisEvent:
@@ -378,9 +434,18 @@ func (w *Window) pollEvents() {
 			w.closeflag = true
 		case sdl.KeyboardEvent:
 			if t.State == sdl.PRESSED {
+				// A new real press supersedes any pending synthetic-tap release.
+				delete(deferredKeyReleases, t.Keysym.Sym)
+				if deferredLuaKeyInput != t.Keysym.Sym {
+					deferredLuaKeyInput = KeyUnknown
+					deferredLuaKeyInputUntil = time.Time{}
+				}
 				OnKeyPressed(t.Keysym.Sym, t.Keysym.Mod)
 			} else if t.State == sdl.RELEASED {
-				OnKeyReleased(t.Keysym.Sym, t.Keysym.Mod)
+				deferredKeyReleases[t.Keysym.Sym] = deferredKeyRelease{
+					mod:       t.Keysym.Mod,
+					releaseAt: time.Now().Add(syntheticTapHoldDuration),
+				}
 			}
 		case sdl.WindowEvent:
 			if t.Event == sdl.WINDOWEVENT_EXPOSED {

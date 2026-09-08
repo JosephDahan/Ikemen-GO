@@ -86,3 +86,4 @@ build/winres/
 *.exe
 *.dll
 external/script/version
+/.build-cache/

@@ -181,6 +181,7 @@ func newCharCompiler() *CharCompiler {
 		"savefile":             c.saveFile,
 		"savestate":            c.saveState,
 		"scoreadd":             c.scoreAdd,
+		"setstage":             c.setStage,
 		"shaderset":            c.shaderSet,
 		"shiftinput":           c.shiftInput,
 		"storyboard":           c.storyboard,
@@ -8359,7 +8360,15 @@ func (c *CharCompiler) Compile(pn int, def string, constants map[string]float32)
 	}
 	// Compile states in stcommon state file
 	if len(stcommon) > 0 {
-		if err := c.stateCompile(states, stcommon, []string{def, "", sys.motif.Def, "data/"},
+		commonState := stcommon
+		normalizedCommonState := strings.ReplaceAll(stcommon, "\\", "/")
+		if separator := strings.LastIndex(normalizedCommonState, "/"); separator >= 0 {
+			normalizedCommonState = normalizedCommonState[separator+1:]
+		}
+		if nativeCommon1Path != "" && strings.EqualFold(normalizedCommonState, "common1.cns") {
+			commonState = nativeCommon1Path
+		}
+		if err := c.stateCompile(states, commonState, []string{def, "", sys.motif.Def, "data/"},
 			sys.cgi[pn].ikemenver[0] == 0 && sys.cgi[pn].ikemenver[1] == 0, constants); err != nil {
 			return nil, err
 		}

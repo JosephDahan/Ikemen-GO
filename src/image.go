@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"image"
@@ -2259,7 +2260,7 @@ func (s *Sff) cloneSpriteWithPal(g, n uint16, pl *PaletteList) *Sprite {
 	return &osp
 }
 
-func captureScreen() {
+func captureScreenImage() *image.NRGBA {
 	width, height := sys.window.GetSize()
 	pixdata := make([]uint8, 4*width*height)
 	img := image.NewNRGBA(image.Rect(0, 0, width, height))
@@ -2277,6 +2278,17 @@ func captureScreen() {
 		}
 		img.Pix[j] = pixdata[i]
 	}
+	return img
+}
+
+func captureScreenPNG() ([]byte, error) {
+	var data bytes.Buffer
+	err := png.Encode(&data, captureScreenImage())
+	return data.Bytes(), err
+}
+
+func captureScreen() {
+	img := captureScreenImage()
 
 	// Sanitize WindowTitle for use in filenames
 	re := regexp.MustCompile(`[<>:"/\\|?*]`)

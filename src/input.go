@@ -129,6 +129,7 @@ func OnKeyPressed(key Key, mk ModifierKey) {
 		}
 		sys.keyState[key] = true
 		sys.keyInput = key
+		rememberDeferredLuaKeyInput(key)
 		escPressed := key == KeyEscape && (mk&ModCtrlAlt) == 0
 		sys.esc = sys.esc || escPressed
 		sys.escPending = sys.escPending || (sys.gameRunning && escPressed)
