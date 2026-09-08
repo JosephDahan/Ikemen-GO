@@ -165,25 +165,13 @@ func (m Music) Append(other Music) {
 	}
 }
 
-// Override applies element-wise replacement per prefix (by index). If the
-// overriding list is longer, it extends the target. Use when raising
-// priority (e.g. char select params over stage lists, or launchFight over all).
+// Override replaces candidate lists per prefix. Use when raising priority
+// (e.g. char select params over stage lists, or launchFight over all).
 func (m Music) Override(other Music) {
 	//fmt.Printf("[music] Override: applying %d prefix(es) onto %d existing\n", len(other), len(m))
 	for key, otherList := range other {
 		//fmt.Printf("[music] Override: prefix '%s' (%d candidate(s))\n", key, len(otherList))
-		if mList, exists := m[key]; exists {
-			for i, otherBg := range otherList {
-				if i < len(mList) {
-					mList[i] = otherBg
-				} else {
-					mList = append(mList, otherBg)
-				}
-			}
-			m[key] = mList
-		} else {
-			m[key] = otherList
-		}
+		m[key] = otherList
 	}
 }
 
@@ -378,7 +366,7 @@ func (m Music) Play(key, path string) bool {
 	if track != "" && track != sys.bgm.filename {
 		//fmt.Printf("[music] Play: opening track='%s' loop=%d vol=%d loopstart=%d loopend=%d startpos=%d freqmul=%g loopcount=%d\n", track, loop, volume, loopstart, loopend, startposition, freqmul, loopcount)
 		sys.bgm.Open(track, loop, volume, loopstart, loopend, startposition, freqmul, loopcount)
-		sys.playBgmFlg = sys.playBgmFlg || !sys.sel.gameParams.PersistMusic
+		sys.playBgmFlg = sys.gameRunning && (sys.sel.gameParams == nil || !sys.sel.gameParams.PersistMusic)
 		return true
 	}
 	if track == "" {
@@ -436,7 +424,7 @@ func (m Music) tryPlay(key, def string) bool {
 		sys.bgm.Open(track, int(bg.bgmloop), int(bg.bgmvolume),
 			int(bg.bgmloopstart), int(bg.bgmloopend), int(bg.bgmstartposition),
 			bg.bgmfreqmul, int(bg.bgmloopcount))
-		sys.playBgmFlg = sys.playBgmFlg || !sys.sel.gameParams.PersistMusic
+		sys.playBgmFlg = sys.gameRunning && (sys.sel.gameParams == nil || !sys.sel.gameParams.PersistMusic)
 	}
 	return true
 }
@@ -492,7 +480,9 @@ func (m Music) act() {
 						break
 					}
 				}
-				if lowLife && cmusic.tryPlay("life", sys.stage.def) {
+				if lowLife &&
+					(sys.stage.bgmtrigger == 1 || sys.decisiveRound[(c.playerNo+1)&1]) &&
+					cmusic.tryPlay("life", sys.stage.def) {
 					sys.stage.bgmState = BGMStateLowLife
 					continue
 				}

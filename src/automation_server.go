@@ -727,7 +727,7 @@ func updateAutomationRuntimeState() {
 		MinScale:       sys.cam.MinScale,
 		XMin:           sys.cam.XMin,
 		XMax:           sys.cam.XMax,
-		ZoomEnabled:    sys.cam.ZoomEnable,
+		ZoomEnabled:    sys.cam.zoomEnabled(),
 		View:           int(sys.cam.View),
 	}
 	automationRuntime.UpdatedAt = time.Now().Format(time.RFC3339Nano)

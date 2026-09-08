@@ -109,6 +109,7 @@ type SystemStateVars struct {
 	lastTick                float32
 	nextAddTime             float32
 	oldNextAddTime          float32
+	uiFrameCounter          int32
 	xmin, xmax              float32
 	zmin, zmax              float32
 	winskipped              bool
@@ -304,6 +305,7 @@ type System struct {
 	whitePalTex         Texture
 	usePalette          bool
 	gameRunning         bool
+	escPending          bool
 
 	msaa               int32
 	externalShaders    [][][]byte
@@ -583,12 +585,11 @@ func (s *System) middleOfMatch() bool {
 }
 
 func (s *System) skipMotifScaling() bool {
-	var lc [2]int32
-	if (!s.middleOfMatch() && !s.postMatchFlg) || s.stage == nil {
-		lc = s.motif.Info.Localcoord
-	} else {
-		lc = s.stage.stageCamera.localcoord
+	if (s.middleOfMatch() || s.postMatchFlg) && s.stage != nil {
+		// Use the configured fight aspect instead of raw stage localcoord.
+		return s.getFightAspect() > s.getMotifAspect()
 	}
+	lc := s.motif.Info.Localcoord
 	return CalculateAspect(lc[0], lc[1]) > s.getMotifAspect()
 }
 
@@ -619,38 +620,40 @@ func (s *System) getMotifAspect() float32 {
 }
 
 func (s *System) getCurrentAspect() float32 {
-	skip := s.skipMotifScaling()
-	motifAspectActive := s.shouldPersistMotifAspect() && (s.motif.di.active ||
-		s.motif.me.active && s.motif.me.state != ME_OpeningOut && s.motif.me.state != ME_ClosingIn)
-	if (s.postMatchFlg && skip) || (s.middleOfMatch() && !motifAspectActive) {
+	if (s.postMatchFlg && s.skipMotifScaling()) ||
+		(s.middleOfMatch() && !s.shouldComposeFullResolution()) {
 		return s.getFightAspect()
 	}
 	return s.getMotifAspect()
 }
 
-func (s *System) setGameSize(w, h int32) {
-	s.scrrect[2], s.scrrect[3] = w, h
-
+func aspectStateForSize(w, h int32) drawAspectState {
 	// TODO: These ought to be system constants maybe
 	baseWidth := int32(320)
 	baseHeight := int32(240)
 
 	screenAspect := CalculateAspect(w, h)
 	targetAspect := CalculateAspect(baseWidth, baseHeight)
+	st := drawAspectState{}
 
 	if screenAspect > targetAspect {
 		// Screen is wider than 4:3 - scale based on height
-		s.gameWidth = float32(baseHeight) * screenAspect
-		s.gameHeight = float32(baseHeight)
+		st.gameWidth = float32(baseHeight) * screenAspect
+		st.gameHeight = float32(baseHeight)
 	} else {
 		// Screen is taller than 4:3 - scale based on width
-		s.gameWidth = float32(baseWidth)
-		s.gameHeight = float32(baseWidth) / screenAspect
+		st.gameWidth = float32(baseWidth)
+		st.gameHeight = float32(baseWidth) / screenAspect
 	}
 
-	// Update scale
-	s.widthScale = float32(s.scrrect[2]) / s.gameWidth
-	s.heightScale = float32(s.scrrect[3]) / s.gameHeight
+	st.widthScale = float32(w) / st.gameWidth
+	st.heightScale = float32(h) / st.gameHeight
+	return st
+}
+
+func (s *System) setGameSize(w, h int32) {
+	s.scrrect[2], s.scrrect[3] = w, h
+	s.restoreAspectState(aspectStateForSize(w, h))
 }
 
 // Change aspect ratio at match start
@@ -710,35 +713,81 @@ func (s *System) restoreAspectState(st drawAspectState) {
 	s.heightScale = st.heightScale
 }
 
+func (s *System) withAspectState(st drawAspectState, fn func()) {
+	prev := s.captureAspectState()
+	s.restoreAspectState(st)
+	defer s.restoreAspectState(prev)
+	fn()
+}
+
 func (s *System) wrapDrawWithAspectState(fn func()) func() {
 	if fn == nil {
 		return nil
 	}
 	st := s.captureAspectState()
 	return func() {
-		prev := s.captureAspectState()
-		s.restoreAspectState(st)
-		defer s.restoreAspectState(prev)
-		fn()
+		drawState := st
+		// Resolve late activation before executing a queued draw.
+		if s.shouldComposeFullResolution() {
+			drawState = aspectStateForSize(s.scrrect[2], s.scrrect[3])
+		}
+		s.withAspectState(drawState, fn)
 	}
 }
 
-func (s *System) shouldPersistMotifAspect() bool {
+func (s *System) canUseFullResolutionAspect() bool {
 	return s.cfg.Video.KeepAspect && !s.skipMotifScaling()
 }
 
-func (s *System) enterMotifAspect() {
-	if !s.shouldPersistMotifAspect() {
-		return
-	}
-	s.setGameSize(s.scrrect[2], s.scrrect[3])
+func (s *System) motifOverlayActive() bool {
+	return s.motif.di.active ||
+		s.motif.me.active && s.motif.me.state != ME_OpeningOut && s.motif.me.state != ME_ClosingIn
 }
 
-func (s *System) leaveMotifAspect() {
-	if !s.shouldPersistMotifAspect() {
-		return
+func (s *System) shouldComposeFullResolution() bool {
+	return s.canUseFullResolutionAspect() &&
+		(!s.middleOfMatch() || s.motifOverlayActive() || s.debugDisplay)
+}
+
+func (s *System) fightViewport() [4]int32 {
+	viewport := s.scrrect
+	fightAspect := s.getFightAspect()
+	motifAspect := s.getMotifAspect()
+	if fightAspect <= 0 || motifAspect <= 0 || fightAspect == motifAspect {
+		return viewport
 	}
-	s.applyFightAspect()
+
+	if fightAspect < motifAspect {
+		contentWidth := int32(float32(s.scrrect[3]) * fightAspect)
+		contentWidth = Clamp(contentWidth, int32(0), s.scrrect[2])
+		viewport[0] += (s.scrrect[2] - contentWidth) / 2
+		viewport[2] = contentWidth
+	} else {
+		contentHeight := int32(float32(s.scrrect[2]) / fightAspect)
+		contentHeight = Clamp(contentHeight, int32(0), s.scrrect[3])
+		viewport[1] += (s.scrrect[3] - contentHeight) / 2
+		viewport[3] = contentHeight
+	}
+	return viewport
+}
+
+func intersectRect(a, b [4]int32) [4]int32 {
+	x1 := Max(a[0], b[0])
+	y1 := Max(a[1], b[1])
+	x2 := Min(a[0]+a[2], b[0]+b[2])
+	y2 := Min(a[1]+a[3], b[1]+b[3])
+	if x2 <= x1 || y2 <= y1 {
+		return [4]int32{x1, y1, 0, 0}
+	}
+	return [4]int32{x1, y1, x2 - x1, y2 - y1}
+}
+
+func (s *System) fightDrawClip() ([4]int32, bool) {
+	if !s.shouldComposeFullResolution() {
+		return s.scrrect, false
+	}
+	viewport := s.fightViewport()
+	return viewport, viewport != s.scrrect
 }
 
 func (s *System) setGameAspect() {
@@ -844,6 +893,12 @@ func (s *System) await(fps int) bool {
 		waitDuration = time.Second / time.Duration(fps)
 	}
 
+	// Rebase when the old deadline is more than one frame ahead.
+	if diff >= waitDuration+2*time.Millisecond {
+		s.redrawWait.nextTime = now
+		diff = 0
+	}
+
 	// Increment the deadline
 	s.redrawWait.nextTime = s.redrawWait.nextTime.Add(waitDuration)
 
@@ -870,16 +925,14 @@ func (s *System) await(fps int) bool {
 }
 
 func (s *System) renderFrame() {
-	if !s.frameSkip {
-		x, y, scl := s.cam.Pos[0], s.cam.Pos[1], s.cam.Scale/s.cam.BaseScale()
-		dx, dy, dscl := s.zoom.apply(x, y, scl)
-		s.draw(dx, dy, dscl)
+	// Full-resolution scaling is render-only; gameplay remains in fight space.
+	logicState := s.captureAspectState()
+	if s.shouldComposeFullResolution() {
+		s.restoreAspectState(aspectStateForSize(s.scrrect[2], s.scrrect[3]))
 	}
+	defer s.restoreAspectState(logicState)
 
-	// Lua
-	if !s.frameSkip {
-		s.luaFlushDrawQueue()
-	} else {
+	if s.frameSkip {
 		// Keep pause-menu logic responsive even when this render frame is skipped.
 		// Any queued draw ops are discarded below because this frame is not being rendered.
 		if s.motif.me.active {
@@ -887,16 +940,29 @@ func (s *System) renderFrame() {
 		}
 		// On skipped frames, discard queued draws to avoid buildup.
 		s.luaDiscardDrawQueue()
+		return
 	}
+
+	x, y, scl := s.cam.Pos[0], s.cam.Pos[1], s.cam.Scale/s.cam.BaseScale()
+	dx, dy, dscl := s.zoom.apply(x, y, scl)
+	s.draw(dx, dy, dscl)
+
+	// Lua
+	s.luaFlushDrawQueue()
+	// Fullscreen fades are the final scene pass, after all deferred Lua UI.
+	s.fightScreen.drawFade()
+	s.motif.drawFade()
 
 	// Render top elements
-	if !s.frameSkip {
-		s.drawTop()
-	}
+	s.drawTop()
 
 	// Render debug elements
-	if !s.frameSkip && s.debugDisplay {
-		s.drawDebugText()
+	if s.debugDisplay {
+		// Re-mask fight-only frames before drawing full-resolution debug panels.
+		if s.middleOfMatch() && !s.motifOverlayActive() {
+			s.motif.drawAspectBars()
+		}
+		s.drawDebugText(logicState)
 	}
 }
 
@@ -971,7 +1037,8 @@ func (s *System) tickSound() {
 	}
 
 	// Always pause if noMusic flag set, pause master volume is 0, or freqmul is 0.
-	s.bgm.SetPaused(s.nomusic || (s.paused && s.cfg.Sound.PauseMasterVolume == 0) || (s.bgm.freqmul == 0))
+	bgmPause := s.nomusic || (s.paused && s.cfg.Sound.PauseMasterVolume == 0) || s.bgm.freqmul == 0 || s.motifPauseMusic()
+	s.bgm.SetPaused(bgmPause)
 
 	if s.paused {
 		// Apply BGM pause volume once per pause, even when the original BGM volume is 0.
@@ -1019,6 +1086,59 @@ func (s *System) loaderReset() {
 func (s *System) loadStart() {
 	s.loaderReset()
 	s.loader.runTread()
+}
+
+// Release char FFX belonging to reloading slots so that they can be reloaded without hitting cache
+func (s *System) releaseReloadingCharFx() {
+	s.loadMutex.Lock()
+	defer s.loadMutex.Unlock()
+
+	// Fast path
+	// Nothing to release if no char FFX is loaded at all
+	hasCharFfx := false
+	for _, ffx := range s.ffx {
+		if ffx != nil && ffx.isCharFX {
+			hasCharFfx = true
+			break
+		}
+	}
+	if !hasCharFfx {
+		return
+	}
+
+	// Check each reloading slot
+	// MatchRestart sctrl can reload only specific chars
+	// We don't want to release FFX that will still be needed
+	for i, reload := range s.reloadCharSlot {
+		if !reload {
+			continue
+		}
+		for _, fxPath := range s.cgi[i].fxPath {
+			stillNeeded := false
+			for j := range s.cgi {
+				if s.reloadCharSlot[j] {
+					continue // Reloading slots don't count as still needing it
+				}
+				for _, otherPath := range s.cgi[j].fxPath {
+					if otherPath == fxPath {
+						stillNeeded = true
+						break
+					}
+				}
+				if stillNeeded {
+					break
+				}
+			}
+			if stillNeeded {
+				continue
+			}
+			for prefix, ffx := range s.ffx {
+				if ffx != nil && ffx.isCharFX && ffx.fileName == fxPath {
+					delete(s.ffx, prefix)
+				}
+			}
+		}
+	}
 }
 
 // Drop everything that might have been partially produced by the pre-match async loader.
@@ -1495,6 +1615,14 @@ func (s *System) uiEnsureCommandLists(total int) error {
 
 func (s *System) netplay() bool {
 	return s.rollback.session != nil || s.netConnection != nil || s.replayFile != nil
+}
+
+func (s *System) usesRollbackMatch() bool {
+	if s.replayFile != nil {
+		return false
+	}
+	return s.rollback.session != nil ||
+		(s.netConnection == nil && s.cfg.Netplay.Rollback.DesyncTestFrames > 0)
 }
 
 func (s *System) escExit() bool {
@@ -2373,7 +2501,7 @@ func (s *System) updateMusicMaps() {
 
 // TODO: This function is still a bit overloaded because it's handling some selections instead of doing a pure reset
 func (s *System) resetRound() {
-	if s.sel.gameParams.PersistRounds && !s.roundResetFlg {
+	if s.sel.gameParams.PersistRounds && !s.roundResetFlg && !s.reloadFlg {
 		s.persistRoundCount++
 	}
 
@@ -2404,7 +2532,7 @@ func (s *System) resetRound() {
 	s.lastHitter = [2]int{-1, -1}
 	s.slowtime = s.fightScreen.round.slow_time
 	s.winposetime = s.fightScreen.round.over_wintime
-	s.winwaittime = s.fightScreen.round.over_waittime + s.fightScreen.round.over_forcewintime
+	s.winwaittime = s.fightScreen.round.over_forcewintime
 	s.winskipped = false
 	s.intro = s.fightScreen.round.start_waittime + s.fightScreen.round.ctrl_time + 1
 	s.curRoundTime = s.maxRoundTime
@@ -2492,6 +2620,30 @@ func (s *System) debugPaused() bool {
 	return s.paused && !s.frameStepFlag && s.oldTickCount < s.tickCount
 }
 
+func (s *System) motifPauseGame() bool {
+	// Menu is open
+	if s.motif.me.active {
+		return true
+	}
+	// Challenger screen triggered
+	// TODO: Maybe this should always pause instead of having a "time" parameter
+	if s.motif.ch.active && s.motif.ch.counter >= s.motif.ChallengerInfo.Pause.Time {
+		return true
+	}
+	return false
+}
+
+func (s *System) matchPaused() bool {
+	return s.debugPaused() || s.motifPauseGame()
+}
+
+func (s *System) motifPauseMusic() bool {
+	if s.motif.ch.active && s.motif.ch.counter >= s.motif.ChallengerInfo.Pause.Time {
+		return true
+	}
+	return false
+}
+
 // "Tick frames" are the frames where most of the game logic happens
 func (s *System) tickFrame() bool {
 	return (!s.paused || s.frameStepFlag) && s.oldTickCount < s.tickCount
@@ -2516,6 +2668,10 @@ func (s *System) tickInterpolation() float32 {
 		return Clamp(progress, 0, 1)
 	}
 	return 1
+}
+
+func (s *System) uiTick() bool {
+	return s.tickFrame() || s.debugPaused() || s.motif.me.active || s.motif.ch.active
 }
 
 func (s *System) addFrameTime(t float32) bool {
@@ -2659,6 +2815,26 @@ func (s *System) clearSpriteData() {
 	}
 }
 
+// Centralized call of every cueDraw()
+func (s *System) cueDraw() {
+	// No need to cue when we won't render
+	if s.frameSkip {
+		return
+	}
+
+	// Start fresh each frame
+	s.clearSpriteData()
+
+	for i := range s.projs {
+		for _, p := range s.projs[i] {
+			p.cueDraw()
+		}
+	}
+
+	s.charList.cueDraw()
+	s.explodCueDraw()
+}
+
 func (s *System) screenleft() float32 {
 	return float32(s.stage.screenleft) * s.stage.localscl
 }
@@ -2667,8 +2843,12 @@ func (s *System) screenright() float32 {
 	return float32(s.stage.screenright) * s.stage.localscl
 }
 
+// Core game logic. Chars, stage, projectiles, etc
+// The part that can rewind and fast forward during rollbacks
 func (s *System) action() {
-	s.clearSpriteData()
+	if s.matchPaused() {
+		return
+	}
 
 	var x, y, scl float32 = s.cam.Pos[0], s.cam.Pos[1], s.cam.Scale / s.cam.BaseScale()
 	s.cam.ResetTracking()
@@ -2715,6 +2895,10 @@ func (s *System) action() {
 		}
 
 		// Start pause timers
+		// In Mugen, this seems to happen in the same frame the pause is called, after all chars run
+		// Explod pausing behavior backs it up, since they pause immediately in the same frame
+		// But the screen darkening only happens in the next frame and thus lasts 1 frame shorter than expected
+		// Ikemen's way is a bit more consistent, but causes https://github.com/ikemen-engine/Ikemen-GO/issues/3889
 		if s.supertimebuffer < 0 {
 			s.supertimebuffer = ^s.supertimebuffer
 			s.supertime = s.supertimebuffer
@@ -2740,7 +2924,7 @@ func (s *System) action() {
 
 		// The following must be placed after char action or they will lag behind 1 frame
 		s.allPalFX.step()
-		s.bgPalFX.step()
+		s.bgPalFX.step() // In Mugen, it steps even while the stage is paused
 		s.envShake.update()
 		s.zoom.update()
 		s.nomusic = s.gsf(GSF_nomusic) && !sys.postMatchFlg
@@ -2753,7 +2937,9 @@ func (s *System) action() {
 	// Update the fight screen
 	// Lifebar and combo must update after character states but before hit detection for accurate detection
 	// So that it allows a combo to still end if a character is hit in the same frame where it exits movetype H
-	s.fightScreen.step()
+	if s.tickFrame() {
+		s.fightScreen.step()
+	}
 
 	if s.tickNextFrame() {
 		s.globalCollision() // This could perhaps happen during "tick frame" instead? Would need more testing
@@ -2768,7 +2954,7 @@ func (s *System) action() {
 		s.runIntroSkip()
 	}
 
-	if !s.cam.ZoomEnable {
+	if !s.cam.zoomEnabled() {
 		// Lower the precision to prevent errors in Pos X.
 		x = float32(math.Ceil(float64(x)*4-0.5) / 4)
 	}
@@ -2787,39 +2973,30 @@ func (s *System) action() {
 	}
 	s.charList.xScreenBound()
 
-	for i := range s.projs {
-		for _, p := range s.projs[i] {
-			p.cueDraw()
-		}
-	}
-
-	s.charList.cueDraw()
-
 	// Note: Explod update must happen after hit detection. Because hit sparks are also explods
 	s.explodUpdate()
 	s.charTextsUpdate()
-	s.explodCueDraw()
 
 	// Adjust game speed
-	if s.tickNextFrame() {
+	if s.tickNextFrame() && !s.motif.me.active {
 		spd := float32(s.gameLogicSpeed()) / float32(s.gameRenderSpeed())
 
 		// KO slowdown
 		if st := s.getSlowtime(); st > 0 {
 			if !s.gsf(GSF_nokoslow) {
-				base := s.fightScreen.round.slow_speed
+				slowSpeed := s.fightScreen.round.slow_speed
 				fade := s.fightScreen.round.slow_fadetime
-				spd *= base
 				if st < fade {
 					ratio := float32(fade-st) / float32(fade)
-					spd = base + (1-base)*ratio
+					slowSpeed += (1 - slowSpeed) * ratio
 				}
+				spd *= slowSpeed
 			}
 			s.slowtime--
 		}
 
-		// Outside match or while frame stepping
-		if s.postMatchFlg || s.frameStepFlag {
+		// While frame stepping
+		if s.frameStepFlag {
 			spd = 1
 		}
 
@@ -2854,7 +3031,21 @@ func (s *System) action() {
 		}
 	}
 
-	// Update motif
+	return
+}
+
+func (s *System) uiAction() {
+	if !s.uiTick() {
+		return
+	}
+
+	if s.escPending {
+		s.esc = true
+		s.escPending = false
+	}
+	s.uiFrameCounter++
+
+	// Step motif
 	// Needs to happen at the very end or pause toggles will get out of sync
 	// https://github.com/ikemen-engine/Ikemen-GO/issues/3080
 	s.motif.step()
@@ -2863,7 +3054,7 @@ func (s *System) action() {
 	s.motif.act()
 
 	// Common Lua calls
-	// Needs to happens after motif update or motif inputs will lag 1 frame
+	// Needs to happen after motif update or motif inputs will lag 1 frame
 	for _, key := range SortedKeys(sys.cfg.Common.Lua) {
 		for _, v := range sys.cfg.Common.Lua[key] {
 			if err := sys.luaLState.DoString(v); err != nil {
@@ -2871,9 +3062,6 @@ func (s *System) action() {
 			}
 		}
 	}
-
-	s.tickSound()
-	return
 }
 
 // Update all projectiles for all players
@@ -2914,6 +3102,13 @@ func (s *System) projectilePrune(pn int) {
 
 // Update all explods for all players
 func (s *System) explodUpdate() {
+	// Checking for pause here fixes explods travelling too far while game is paused
+	// https://github.com/ikemen-engine/Ikemen-GO/issues/1729
+	// Update: this fix is no longer necessary after the sys.action()/sys.uiAction() refactor
+	//if s.paused && !s.frameStepFlag {
+	//	return
+	//}
+
 	// Update each explod in storage order
 	for i := range s.explods {
 		for _, e := range s.explods[i] {
@@ -3138,15 +3333,6 @@ func (s *System) stepRoundState() {
 		return
 	}
 
-	// Fading
-	if !(s.fightScreen.round.fadeOut.isActive() || s.fightScreen.round.fadeIn.isActive()) {
-		if s.motif.fadeOut.isActive() {
-			s.motif.fadeOut.step()
-		} else if s.motif.fadeIn.isActive() {
-			s.motif.fadeIn.step()
-		}
-	}
-
 	// Intros
 	if s.intro > s.fightScreen.round.ctrl_time {
 		s.intro--
@@ -3219,8 +3405,17 @@ func (s *System) stepRoundState() {
 		}
 
 		// Check if player skipped win pose time
-		if !s.winskipped && s.winposetime < 0 && s.anyButton() &&
-			!s.gsf(GSF_roundnotskip) && !matchEndDialoguePending {
+		skipCandidate := !s.winskipped && s.winposetime < 0
+		anyButton := false
+		if skipCandidate {
+			anyButton = s.anyButton()
+		}
+		roundnotskip := s.gsf(GSF_roundnotskip)
+		skipEligible := skipCandidate && anyButton && !roundnotskip && !matchEndDialoguePending
+		if s.rollback.session != nil && s.rollback.session.config.LogsEnabled {
+			s.rollback.session.log.logRoundSkipCheck(fadeoutStart, anyButton, roundnotskip, skipEligible, matchEndDialoguePending)
+		}
+		if skipEligible {
 			s.intro = Min(s.intro, fadeoutStart)
 			s.winskipped = true
 		}
@@ -3257,9 +3452,9 @@ func (s *System) stepRoundState() {
 						if p[0].scf(SCF_over_alive) || p[0].scf(SCF_over_ko) {
 							continue
 						}
-						// Mugen seems to skip this anim 5 check on time overs
-						// It also seems a bit pointless here to begin with because the char has already turned by the time anim 5 starts
-						if p[0].scf(SCF_ctrl) && p[0].ss.moveType == MT_I && p[0].ss.stateType == ST_S && p[0].animNo != 5 {
+						// We used to wait for players that were in animation 5 (turning) here, but that doesn't seem to be the case in Mugen
+						// https://github.com/ikemen-engine/Ikemen-GO/issues/2919
+						if p[0].scf(SCF_ctrl) && p[0].ss.moveType == MT_I && p[0].ss.stateType == ST_S {
 							continue
 						}
 						// Freeze timer if any player is not ready to proceed yet
@@ -3650,17 +3845,18 @@ func (s *System) draw(x, y, scl float32) {
 	// Draw motif layer 2
 	s.motif.draw(2)
 
-	// Draw system fade/shutter over top-layer texts
-	s.fightScreen.drawFade()
-
 	// Draw motif layer 3
 	s.motif.draw(3)
 }
 
 func (s *System) drawCharTexts(layerno int16) {
+	var clip *[4]int32
+	if viewport, ok := s.fightDrawClip(); ok {
+		clip = &viewport
+	}
 	for _, playerTexts := range s.chartexts {
 		for _, ts := range playerTexts {
-			ts.Draw(layerno)
+			ts.draw(layerno, clip)
 		}
 	}
 }
@@ -3695,7 +3891,34 @@ func (s *System) drawTop() {
 	}
 }
 
-func (s *System) drawDebugText() {
+func (s *System) debugTextScale(st drawAspectState) (sx, sy float32) {
+	sx, sy = st.widthScale, st.heightScale
+	if s.cfg.Video.KeepAspect {
+		sx = Min(st.widthScale, st.heightScale)
+		sy = sx
+	}
+	if sx <= 0 {
+		sx = 1
+	}
+	if sy <= 0 {
+		sy = 1
+	}
+	return
+}
+
+func (s *System) drawDebugText(logicState drawAspectState) {
+	sceneState := s.captureAspectState()
+	defer s.restoreAspectState(sceneState)
+
+	// Evaluate debug data in gameplay space; only drawing uses panelState.
+	s.restoreAspectState(logicState)
+
+	panelState := sceneState
+	if !s.cfg.Video.KeepAspect || s.canUseFullResolutionAspect() {
+		panelState = aspectStateForSize(s.scrrect[2], s.scrrect[3])
+	}
+
+	debugScaleX, debugScaleY := s.debugTextScale(panelState)
 	put := func(x, y *float32, txt string) {
 		for txt != "" {
 			w, drawTxt := int32(0), ""
@@ -3709,16 +3932,18 @@ func (s *System) drawDebugText() {
 			if drawTxt == "" {
 				drawTxt, txt = txt, ""
 			}
-			*y += float32(s.debugFont.fnt.Size[1]) * s.debugFont.yscl / s.heightScale
-			s.debugFont.fnt.Print(drawTxt, *x, *y, s.debugFont.xscl/s.widthScale,
-				s.debugFont.yscl/s.heightScale, 0, Rotation{0, 0, 0}, 0, 0, 0, 1, &s.scrrect,
-				s.debugFont.palfx, s.debugFont.frgba)
+			*y += float32(s.debugFont.fnt.Size[1]) * s.debugFont.yscl / debugScaleY
+			s.withAspectState(panelState, func() {
+				s.debugFont.fnt.Print(drawTxt, *x, *y, s.debugFont.xscl/debugScaleX,
+					s.debugFont.yscl/debugScaleY, 0, Rotation{0, 0, 0}, 0, 0, 0, 1, &s.scrrect,
+					s.debugFont.palfx, s.debugFont.frgba)
+			})
 		}
 	}
 	if s.debugDisplay {
-		// Player Info on top of screen
-		x := (320-float32(s.gameWidth))/2 + 1
-		y := 240 - float32(s.gameHeight)
+		// Debug panels use the full game-resolution canvas.
+		x := (320-panelState.gameWidth)/2 + 1
+		y := 240 - panelState.gameHeight
 		if s.statusLFunc != nil {
 			s.debugFont.SetColor(255, 255, 255, 255)
 			for i, p := range s.chars {
@@ -3736,14 +3961,14 @@ func (s *System) drawDebugText() {
 			}
 		}
 		// Console
-		y = Max(y, 48+240-float32(s.gameHeight))
+		y = Max(y, 48+240-panelState.gameHeight)
 		s.debugFont.SetColor(255, 255, 255, 255)
 		for _, s := range s.consoleText {
 			put(&x, &y, s)
 		}
 		// Data
-		y = float32(s.gameHeight) - float32(s.debugFont.fnt.Size[1])*sys.debugFont.yscl/s.heightScale*
-			(float32(len(s.listLFunc))+float32(s.cfg.Debug.ClipboardRows)) - 1*s.heightScale
+		y = panelState.gameHeight - float32(s.debugFont.fnt.Size[1])*sys.debugFont.yscl/debugScaleY*
+			(float32(len(s.listLFunc))+float32(s.cfg.Debug.ClipboardRows)) - 1*panelState.heightScale
 		// Get debug char reference. Default to player 1 if out of bounds
 		pn := s.debugRef[0]
 		hn := s.debugRef[1]
@@ -3783,16 +4008,31 @@ func (s *System) drawDebugText() {
 			put(&x, &y, s)
 		}
 	}
+	// Collision labels remain in scene space so they track sprites.
+	s.restoreAspectState(sceneState)
+	debugScaleX, debugScaleY = s.debugTextScale(sceneState)
 	// Draw Clsn text
 	// Unlike Mugen, this is drawn separately from the Clsn boxes themselves, making debug more flexible
 	//if s.clsnDisplay {
 	for _, t := range s.debugClsnText {
 		s.debugFont.SetColor(t.r, t.g, t.b, t.a)
-		s.debugFont.fnt.Print(t.text, t.x, t.y, s.debugFont.xscl/s.widthScale,
-			s.debugFont.yscl/s.heightScale, 0, Rotation{0, 0, 0}, 0, 0, 0, 0, &s.scrrect,
+		s.debugFont.fnt.Print(t.text, t.x, t.y, s.debugFont.xscl/debugScaleX,
+			s.debugFont.yscl/debugScaleY, 0, Rotation{0, 0, 0}, 0, 0, 0, 0, &s.scrrect,
 			s.debugFont.palfx, s.debugFont.frgba)
 	}
 	//}
+}
+
+func (s *System) keepMatchRunning() bool {
+	// Match still in progress
+	if !s.endMatch {
+		return true
+	}
+	// Match ended, but fightscreen fade still needs time to complete
+	if s.fightScreen.round.fadeOut.isActive() {
+		return true
+	}
+	return false
 }
 
 // Starts and runs gameplay
@@ -3871,7 +4111,7 @@ func (s *System) runMatch() (reload bool) {
 
 	if s.cfg.Config.TurnsLoading {
 		s.startNextTurnsPreload()
-		if (s.rollback.session != nil || s.cfg.Netplay.Rollback.DesyncTestFrames > 0) && !s.finishTurnsPreloadForRollback() {
+		if s.usesRollbackMatch() && !s.finishTurnsPreloadForRollback() {
 			return false
 		}
 	}
@@ -3882,12 +4122,12 @@ func (s *System) runMatch() (reload bool) {
 
 	// Now switch to rollback if applicable
 	// TODO: More merging so we don't hijack this function at all
-	if s.rollback.session != nil || s.cfg.Netplay.Rollback.DesyncTestFrames > 0 {
-		return s.rollback.hijackRunMatch(s)
+	if s.usesRollbackMatch() {
+		return s.rollback.hijackRunMatch()
 	}
 
 	// Loop until end of match
-	for !s.endMatch || s.fightScreen.round.fadeOut.isActive() {
+	for s.keepMatchRunning() {
 		s.frameStepFlag = false
 
 		for _, v := range s.shortcutScripts {
@@ -3915,6 +4155,23 @@ func (s *System) runMatch() (reload bool) {
 
 		// Update game state
 		s.action()
+
+		// Update motif
+		s.uiAction()
+
+		// Patch: Pause stage videos while game is paused
+		// This is necessary for the time being because videos are paused in the stage's action() and pauses now just skip that entirely
+		// TODO: Do this right. Maybe have videos use a "keep playing" signal instead of manually pausing
+		if s.matchPaused() && s.stage != nil {
+			for _, b := range s.stage.bg {
+				if b != nil && b._type == BG_Video && b.video != nil {
+					b.video.SetPlaying(false)
+				}
+			}
+		}
+
+		// Step sounds after both the core game and motif have updated
+		s.tickSound()
 
 		debugInput()
 
@@ -3953,7 +4210,7 @@ func (s *System) runMatch() (reload bool) {
 				s.roundNo = 1
 				s.roundsExisted = [2]int32{}
 
-				s.statsLog.abortMatch()
+				s.statsLog.discardCurrentMatch()
 				s.statsLog.startMatch()
 
 				// Recover the round 1 backup
@@ -3965,6 +4222,11 @@ func (s *System) runMatch() (reload bool) {
 
 		// F4 pressed to reset round
 		if s.roundResetFlg && !s.postMatchFlg {
+			restartTurnsPreload := s.turnsPreloadActive()
+			if restartTurnsPreload {
+				// Restore and the background loader both write the standby character slots
+				s.loader.reset()
+			}
 			for i := 0; i < MaxPlayerNo; i++ {
 				if s.reloadPreserveVars[i] {
 					s.saveCharVars(i)
@@ -3972,6 +4234,9 @@ func (s *System) runMatch() (reload bool) {
 			}
 			s.roundBackup.Restore()
 			s.resetRound()
+			if restartTurnsPreload {
+				s.startNextTurnsPreload()
+			}
 		}
 
 		// Shift+F4 pressed to restart match
@@ -3984,11 +4249,12 @@ func (s *System) runMatch() (reload bool) {
 			break
 		}
 
-		if s.endMatch && !s.fightScreen.round.fadeOut.isActive() {
+		if !s.keepMatchRunning() {
 			break
 		}
 
-		// Render frame
+		// Cue sprites, then render
+		s.cueDraw()
 		s.renderFrame()
 
 		// Update system. Break if update returns false (engine shutdown).
@@ -4135,8 +4401,16 @@ func (s *System) SetupCharRoundStart() {
 }
 
 func (s *System) runNextRound() bool {
-	if s.roundOver() && !s.fightLoopEnd {
-		if s.holdPostMatchForDialogue() {
+	roundOver := s.roundOver()
+	tickFrame := s.tickFrame()
+	motifEndActive := s.motif.me.active
+	canAdvance := roundOver && !s.fightLoopEnd && (tickFrame || motifEndActive)
+	holdPostMatch := canAdvance && s.holdPostMatchForDialogue()
+	if s.rollback.session != nil && s.rollback.session.config.LogsEnabled && s.intro < 0 {
+		s.rollback.session.log.logRoundAdvanceCheck(roundOver, tickFrame, motifEndActive, s.fightLoopEnd, holdPostMatch, canAdvance)
+	}
+	if canAdvance {
+		if holdPostMatch {
 			return true
 		}
 		s.clearAllSound()
@@ -4209,11 +4483,10 @@ func (s *System) gameLogicSpeed() int32 {
 
 func (s *System) gameRenderSpeed() int {
 	var spd int32
-	if !s.gameRunning || s.rollback.session != nil {
-		// Currently, rendering the motif above 60fps breaks many things, so we'll patch it here
-		// https://github.com/ikemen-engine/Ikemen-GO/issues/2131
-		// Rollback is likewise locked to 60fps anyway, so we'll make it consistent here
-		// TODO: Fix both properly. Motif could interpolate. Rollback should render at Framerate but sync at Gamespeed
+	if !s.gameRunning || s.motif.me.active || s.rollback.session != nil || s.replayFile != nil {
+		// Standalone Lua screens and the Lua-driven pause menu execute one
+		// complete update-and-draw frame per call. Rollback is also fixed at 60 Hz.
+		// TODO: Rollback should render at Framerate but sync at Gamespeed
 		spd = 60
 	} else {
 		spd = int32(s.cfg.Video.Framerate)
@@ -4259,6 +4532,8 @@ func (bk *RoundStartBackup) Save() {
 	// We save helpers as well because of "preserve" parameter
 	for i, chars := range sys.chars {
 		if len(chars) == 0 {
+			// Backups are reused, so discard characters saved for this slot in a previous round
+			bk.charBackup[i] = nil
 			continue
 		}
 
@@ -5743,6 +6018,7 @@ func (s *System) activateNextTurnsFighters() {
 			s.chars[src][0].memberNo != nextMember {
 			continue
 		}
+		outgoingPower := s.chars[dst][0].power
 		s.removePlayerFromCharList(dst)
 		s.removePlayerFromCharList(src)
 		oldDst, oldSrc := dst, src
@@ -5756,6 +6032,7 @@ func (s *System) activateNextTurnsFighters() {
 		s.workingChar = nil
 		s.workingState = nil
 		s.setBGTurnsSlotState(s.chars[dst], dst, true)
+		s.chars[dst][0].power = outgoingPower
 		s.setBGTurnsSlotState(s.chars[src], src, false)
 		if s.chars[dst][0].id < 0 {
 			s.chars[dst][0].id = s.newCharId()
@@ -6247,22 +6524,17 @@ func (l *Loader) load() {
 		}
 	}
 
-	/*
-		// This should now be handled by loadSff()
-		sys.loadMutex.Lock()
-		for prefix, ffx := range sys.ffx {
-			if !ffx.isCharFX {
-				continue
-			}
-			if ffx.refCount <= 0 {
-				if ffx.sff != nil {
-					removeSFFCache(ffx.sff.filename)
-				}
-				delete(sys.ffx, prefix)
-			}
+	// Release char FFX that are no longer needed
+	sys.loadMutex.Lock()
+	for prefix, ffx := range sys.ffx {
+		if ffx == nil || !ffx.isCharFX {
+			continue
 		}
-		sys.loadMutex.Unlock()
-	*/
+		if ffx.refCount <= 0 {
+			delete(sys.ffx, prefix)
+		}
+	}
+	sys.loadMutex.Unlock()
 
 	playerSlotsEnd := len(sys.chars) - MaxAttachedChar
 	charDone, stageDone := make([]bool, len(sys.chars)), stagedTurns
@@ -6388,16 +6660,30 @@ func (l *Loader) load() {
 }
 
 func (l *Loader) reset() {
-	if l.state != LS_NotYet {
+	// Already idle
+	if l.state == LS_NotYet {
+		return
+	}
+
+	if l.state == LS_Loading {
 		// Ensure the loader goroutine gets a cooperative cancel signal.
 		l.requestCancel()
 		l.state = LS_Cancel
 		<-l.loadExit
-		l.state = LS_NotYet
+	} else {
+		// Loader already stopped
+		// Don't wait on loadExit because that can hang if nothing is left to receive
+		select {
+		case <-l.loadExit:
+		default:
+		}
 	}
+	l.state = LS_NotYet
 	l.err = nil
 	l.cancelCh = nil
 	l.cancelOnce = sync.Once{}
+
+	// Drop palette selections from a cancelled load
 	for i := range sys.cgi {
 		keepPreloadedTurnsPal := sys.cfg.Config.TurnsLoading && sys.roundNo > 1 && sys.tmode[i&1] == TM_Turns
 		if sys.roundsExisted[i&1] == 0 && !keepPreloadedTurnsPal {

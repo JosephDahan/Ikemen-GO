@@ -519,7 +519,7 @@ func loadglTFModel(filepath string) (*Model, error) {
 				}[s.MagFilter]
 				min, _ := map[gltf.MinFilter]TextureSamplingParam{
 					gltf.MinUndefined:            TextureSamplingFilterLinear,
-					gltf.MinNearest:              TextureSamplingFilterLinear,
+					gltf.MinNearest:              TextureSamplingFilterNearest,
 					gltf.MinLinear:               TextureSamplingFilterLinear,
 					gltf.MinNearestMipMapNearest: TextureSamplingFilterNearestMipMapNearest,
 					gltf.MinLinearMipMapNearest:  TextureSamplingFilterLinearMipMapNearest,
@@ -1843,7 +1843,9 @@ func drawNode(mdl *Model, scene *Scene, layerNumber int, defaultLayerNumber int,
 		alpha = [2]int32{255, 0}
 	}
 
-	spfx := mdl.pfx.getFinalPalFx(blendMode, alpha)
+	// Apply BGPalFX, then AllPalFX
+	stackedPfx := mdl.pfx.withStacked(sys.bgPalFX, blendMode, alpha)
+	spfx := stackedPfx.getFinalPalFx(blendMode, alpha)
 
 	blendEq := BlendAdd
 	src := BlendOne
@@ -2699,12 +2701,12 @@ func (anim *GLTFAnimation) toggle(enabled bool) {
 	}
 }
 
-func (model *Model) step(turbo float32) {
+func (model *Model) step() {
 	for _, anim := range model.animations {
 		if anim.enabled == false {
 			continue
 		}
-		anim.time += turbo / 60
+		anim.time += 1.0 / 60.0
 		for anim.time >= anim.duration && anim.duration > 0 && (anim.loopCount < 0 || anim.loop < anim.loopCount) {
 			anim.time -= anim.duration
 			anim.loop += 1
