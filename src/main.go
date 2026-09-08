@@ -17,6 +17,7 @@ import (
 
 var Version = "development"
 var BuildTime = "" // Set automatically by GitHub Actions
+var nativeCommon1Path = ""
 
 func init() {
 	if runtime.GOOS != "android" {
@@ -159,6 +160,9 @@ func realMain() {
 
 	// Init the SDL LUT's
 	initLUTs()
+	if err := startAutomationHTTPServer(); err != nil {
+		panic(err)
+	}
 
 	// Config file path
 	configPath := "save/config.ini"
@@ -176,6 +180,33 @@ func realMain() {
 	// Force to OpenGL ES 3.2 for Android
 	if runtime.GOOS == "android" {
 		cfg.Video.RenderMode = "OpenGL ES 3.2"
+	}
+	// A native-control session must always load the semantic UI hooks. Keeping
+	// this decision in the engine prevents launcher/config drift from silently
+	// degrading /state back to screenshots-only observation.
+	if automationEnabled() {
+		automationSystemScript := "external/script/main.synthetic.lua"
+		if configured, ok := sys.cmdFlags["-native-system-script"]; ok {
+			configured = filepath.Clean(strings.TrimSpace(configured))
+			if configured == "." || filepath.IsAbs(configured) || configured == ".." || strings.HasPrefix(configured, ".."+string(filepath.Separator)) {
+				panic(fmt.Errorf("native-control system script must be a game-root-relative Lua path: %q", configured))
+			}
+			automationSystemScript = configured
+		}
+		if _, err := os.Stat(automationSystemScript); err != nil {
+			panic(fmt.Errorf("native-control system script: %w", err))
+		}
+		cfg.Config.System = automationSystemScript
+		if configured, ok := sys.cmdFlags["-native-common1"]; ok {
+			configured = filepath.Clean(strings.TrimSpace(configured))
+			if configured == "." || filepath.IsAbs(configured) || configured == ".." || strings.HasPrefix(configured, ".."+string(filepath.Separator)) {
+				panic(fmt.Errorf("native-control common1 override must be a game-root-relative state path: %q", configured))
+			}
+			if _, err := os.Stat(configured); err != nil {
+				panic(fmt.Errorf("native-control common1 override: %w", err))
+			}
+			nativeCommon1Path = configured
+		}
 	}
 	sys.cfg = *cfg
 	// Logcat("LOG: Config Loaded. System Script: " + sys.cfg.Config.System)

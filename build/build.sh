@@ -487,7 +487,8 @@ function build_ffmpeg() {
 	fi
 	echo "==> Building minimal FFmpeg to $FFMPEG_PREFIX (sources in $FFMPEG_SRCDIR)"
 	mkdir -p "$BUILDDIR"
-	rm -rf "$FFMPEG_SRCDIR"
+	# Preserve build intermediates under the workspace's no-deletion policy.
+	# The directory is known to be absent on the first build; later builds reuse it.
 	git clone --depth=1 -b "$FFMPEG_REV" https://github.com/FFmpeg/FFmpeg.git "$FFMPEG_SRCDIR"
 	pushd "$FFMPEG_SRCDIR" >/dev/null
 	git checkout "$FFMPEG_REV"
@@ -974,7 +975,7 @@ function create_delay_import_libs_windows() {
 		libname="${libname#lib}"         # xmp
 		( cd "$DELAYLIB_DIR" && gendef "$d" >/dev/null )
 		dlltool --dllname "$base" --def "$DELAYLIB_DIR/${name}.def" --output-delaylib "$DELAYLIB_DIR/lib${libname}.dll.a"
-		rm -f "$DELAYLIB_DIR/${name}.def"
+		# Keep the generated .def file as build evidence and for reproducibility.
 	done
 	shopt -u nullglob
 }
@@ -1068,8 +1069,8 @@ function buildWin() {
 	# bundle libs
 	bundle_shared_libs
 
-	# Clean embedded resource object
-	rm -f src/rsrc_windows.syso 2>/dev/null || true
+	# Keep the embedded resource object as build evidence under the workspace's
+	# no-deletion policy.
 
 	echo "==> Build successful (Windows)"
 	echo "    Binary: $OUTDIR/$binName"

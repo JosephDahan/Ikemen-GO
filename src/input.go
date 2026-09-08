@@ -129,6 +129,7 @@ func OnKeyPressed(key Key, mk ModifierKey) {
 		}
 		sys.keyState[key] = true
 		sys.keyInput = key
+		rememberDeferredLuaKeyInput(key)
 		sys.esc = sys.esc ||
 			key == KeyEscape && (mk&ModCtrlAlt) == 0
 		for k, v := range sys.shortcutScripts {

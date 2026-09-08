@@ -843,6 +843,62 @@ local function getPortraitDrawData(v, side, member, params, dataField)
 	return data, drawParams, drawParams == params.loading
 end
 
+local function f_autoFitVsPortrait(v, data, params, x, y)
+	if not v or not v.ref or data == nil or params == nil then
+		return x, y
+	end
+	-- Normalize only the canonical large VS sprite. Authored team/idle
+	-- animations retain their explicit screenpack offsets and motion.
+	if (params.anim or -1) ~= -1
+		or params.spr == nil
+		or params.spr[1] ~= 9000
+		or params.spr[2] ~= 1
+		or params.window == nil then
+		return x, y
+	end
+	local info = animGetSpriteInfo(data)
+	if info == nil or info.Size == nil or info.Offset == nil then
+		return x, y
+	end
+	local charData = start.f_getCharData(v.ref)
+	if charData == nil or not charData.localcoord or charData.localcoord == 0 then
+		return x, y
+	end
+	local coordScale = (charData.portraitscale or 1) * motif.info.localcoord[1] / charData.localcoord
+	local sx = params.scale[1] * coordScale
+	local sy = params.scale[2] * coordScale
+	local windowWidth = params.window[3] - params.window[1] + 1
+	local windowHeight = params.window[4] - params.window[2] + 1
+	if windowWidth <= 0 or windowHeight <= 0 then
+		return x, y
+	end
+	local padding = 16
+	local spriteWidth = math.abs(info.Size[1] * sx)
+	local spriteHeight = math.abs(info.Size[2] * sy)
+	local fit = 1
+	if spriteWidth > 0 and spriteHeight > 0 then
+		fit = math.min(
+			1,
+			math.max(0.01, windowWidth - 2 * padding) / spriteWidth,
+			math.max(0.01, windowHeight - 2 * padding) / spriteHeight
+		)
+	end
+	sx = sx * fit
+	sy = sy * fit
+	animSetScale(data, sx, sy)
+	spriteWidth = math.abs(info.Size[1] * sx)
+	spriteHeight = math.abs(info.Size[2] * sy)
+	local targetLeft = params.window[1] + (windowWidth - spriteWidth) / 2
+	local targetTop = params.window[2] + (windowHeight - spriteHeight) / 2
+	if (params.facing or 1) < 0 then
+		x = targetLeft + (info.Size[1] - info.Offset[1]) * math.abs(sx)
+	else
+		x = targetLeft + info.Offset[1] * math.abs(sx)
+	end
+	y = targetTop + info.Offset[2] * math.abs(sy)
+	return x, y
+end
+
 local function drawPortraitLayer(t_portraits, side, t, subname, last, dataField)
 	local lastIdx = #t_portraits
 	-- "next player replaces previous one" case
@@ -852,11 +908,12 @@ local function drawPortraitLayer(t_portraits, side, t, subname, last, dataField)
 		local v = t_portraits[idx]
 		local data, drawParams, skipOffset = getPortraitDrawData(v, side, idx, params, dataField)
 		if not v.skipCurrent and data ~= nil then
-			main.f_animPosDraw(
-				data,
-				f_portraitsXCalc(side, 1, paramsSide, drawParams, skipOffset),
-				paramsSide.pos[2] + (skipOffset and 0 or drawParams.offset[2])
-			)
+			local x = f_portraitsXCalc(side, 1, paramsSide, drawParams, skipOffset)
+			local y = paramsSide.pos[2] + (skipOffset and 0 or drawParams.offset[2])
+			if t == motif.vs_screen then
+				x, y = f_autoFitVsPortrait(v, data, drawParams, x, y)
+			end
+			main.f_animPosDraw(data, x, y)
 		end
 		-- we're done for this layer in this mode
 		return
@@ -879,11 +936,12 @@ local function drawPortraitLayer(t_portraits, side, t, subname, last, dataField)
 		local v = t_portraits[member]
 		local data, drawParams, skipOffset = getPortraitDrawData(v, side, member, params, dataField)
 		if member <= paramsSide.num and not v.skipCurrent and data ~= nil then
-			main.f_animPosDraw(
-				data,
-				f_portraitsXCalc(side, member, paramsSide, drawParams, skipOffset),
-				paramsSide.pos[2] + (skipOffset and 0 or drawParams.offset[2]) + (member - 1) * paramsSide.spacing[2]
-			)
+			local x = f_portraitsXCalc(side, member, paramsSide, drawParams, skipOffset)
+			local y = paramsSide.pos[2] + (skipOffset and 0 or drawParams.offset[2]) + (member - 1) * paramsSide.spacing[2]
+			if t == motif.vs_screen then
+				x, y = f_autoFitVsPortrait(v, data, drawParams, x, y)
+			end
+			main.f_animPosDraw(data, x, y)
 		end
 	end
 end

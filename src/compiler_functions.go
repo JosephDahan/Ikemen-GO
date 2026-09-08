@@ -5622,6 +5622,30 @@ func (c *CharCompiler) storyboard(is IniSection, sc *StateControllerBase) (State
 	return *ret, err
 }
 
+// setStage implements the MugenHook SetStage controller as a native IKEMEN
+// live-stage swap. Its value is deliberately limited to a literal path, which
+// matches MugenHook's string-table semantics and keeps synchronized content
+// deterministic.
+func (c *CharCompiler) setStage(is IniSection, sc *StateControllerBase) (StateController, error) {
+	ret, err := (*setStage)(sc), c.stateSec(is, func() error {
+		if err := c.paramValue(is, sc, "redirectid",
+			setStage_redirectid, VT_Int, 1, false); err != nil {
+			return err
+		}
+		if err := c.stateParam(is, "value", true, func(data string) error {
+			if len(data) < 2 || data[0] != '"' || data[len(data)-1] != '"' {
+				return Error("SetStage value not enclosed in \"")
+			}
+			sc.add(setStage_value, sc.beToExp(BytecodeExp(data[1:len(data)-1])))
+			return nil
+		}); err != nil {
+			return err
+		}
+		return nil
+	})
+	return *ret, err
+}
+
 func (c *CharCompiler) targetDizzyPointsAdd(is IniSection, sc *StateControllerBase) (StateController, error) {
 	ret, err := (*targetDizzyPointsAdd)(sc), c.stateSec(is, func() error {
 		if err := c.paramValue(is, sc, "redirectid",

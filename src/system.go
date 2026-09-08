@@ -31,6 +31,19 @@ const (
 	MaxPlayerNo     = MaxSimul*2 + MaxAttachedChar
 )
 
+type globalSpecialFlagSource struct {
+	flag        GlobalSpecialFlag
+	playerNo    int
+	helperIndex int
+	playerID    int32
+	helperID    int32
+	parentID    int32
+	team        int
+	name        string
+	stateNumber int32
+	stateTime   int32
+}
+
 // The variables placed in this struct will be saved/loaded automatically by game states
 // Note: Still need to deep copy pointers etc like usual
 // TODO: Testing the changes and cleaning up
@@ -216,6 +229,7 @@ type System struct {
 	SystemStateVars
 
 	window              *Window
+	specialFlagSources  []globalSpecialFlagSource
 	redrawWait          struct{ nextTime, lastDraw time.Time }
 	debugFont           *TextSprite
 	debugDisplay        bool
@@ -806,6 +820,9 @@ func (s *System) await(fps int) bool {
 		if s.isTakingScreenshot {
 			defer captureScreen()
 			s.isTakingScreenshot = false
+		}
+		if len(automationHTTPScreenshot) > 0 {
+			defer serviceAutomationScreenshotRequests()
 		}
 		// Begin the next frame after events have been processed. Do not clear
 		// the screen if network input is present.
@@ -1809,8 +1826,57 @@ func (s *System) setGSF(gsf GlobalSpecialFlag) {
 	s.specialFlag |= gsf
 }
 
+func (s *System) setGSFByChar(gsf GlobalSpecialFlag, c *Char) {
+	s.setGSF(gsf)
+	if c == nil {
+		return
+	}
+	for flag := GlobalSpecialFlag(1); flag <= GSF_skipwindisplay; flag <<= 1 {
+		if gsf&flag == 0 {
+			continue
+		}
+		duplicate := false
+		for _, source := range s.specialFlagSources {
+			if source.flag == flag && source.playerID == c.id && source.stateNumber == c.ss.no {
+				duplicate = true
+				break
+			}
+		}
+		if duplicate {
+			continue
+		}
+		s.specialFlagSources = append(s.specialFlagSources, globalSpecialFlagSource{
+			flag:        flag,
+			playerNo:    c.playerNo,
+			helperIndex: c.helperIndex,
+			playerID:    c.id,
+			helperID:    c.helperId,
+			parentID:    c.parentId,
+			team:        c.teamside,
+			name:        c.name,
+			stateNumber: c.ss.no,
+			stateTime:   c.ss.time,
+		})
+	}
+}
+
+func (s *System) retainGSFSources(flags GlobalSpecialFlag) {
+	if flags == 0 {
+		s.specialFlagSources = s.specialFlagSources[:0]
+		return
+	}
+	retained := s.specialFlagSources[:0]
+	for _, source := range s.specialFlagSources {
+		if source.flag&flags != 0 {
+			retained = append(retained, source)
+		}
+	}
+	s.specialFlagSources = retained
+}
+
 func (s *System) unsetGSF(gsf GlobalSpecialFlag) {
 	s.specialFlag &^= gsf
+	s.retainGSFSources(s.specialFlag)
 }
 
 func (s *System) appendToConsole(str string) {
@@ -2121,6 +2187,7 @@ func (s *System) resetGblEffect() {
 	s.supertime, s.supertimebuffer = 0, 0
 	s.envcol_time = 0
 	s.specialFlag = 0
+	s.retainGSFSources(0)
 }
 
 // Hard reset. Used between rounds
@@ -2547,8 +2614,11 @@ func (s *System) runIntroSkip() {
 
 		// SkipRoundDisplay and SkipFightDisplay flags must be preserved during intro skip frame
 		kept := (s.specialFlag & GSF_skiprounddisplay) | (s.specialFlag & GSF_skipfightdisplay)
+		keptSources := append([]globalSpecialFlagSource(nil), s.specialFlagSources...)
 		s.resetGblEffect()
 		s.specialFlag = kept
+		s.specialFlagSources = keptSources
+		s.retainGSFSources(kept)
 
 		// Reset all characters
 		for i, p := range s.chars {
@@ -2657,10 +2727,12 @@ func (s *System) action() {
 		// In Mugen 1.1, few global AssertSpecial flags persist during pauses. Seemingly only TimerFreeze
 		if s.supertime <= 0 && s.pausetime <= 0 {
 			s.specialFlag = 0
+			s.retainGSFSources(0)
 		} else {
 			// These flags persist even during pauses
 			// "NoKOSlow" added to facilitate custom slowdown. In Mugen that flag only needs to be asserted in first frame of KO slowdown
 			s.specialFlag = (s.specialFlag&GSF_nokoslow | s.specialFlag&GSF_timerfreeze)
+			s.retainGSFSources(s.specialFlag)
 		}
 
 		// Run the main character logic

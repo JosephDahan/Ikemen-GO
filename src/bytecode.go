@@ -5040,7 +5040,7 @@ func (sc assertSpecial) Run(c *Char, _ []int32) bool {
 		case assertSpecial_flag_g:
 			flag := GlobalSpecialFlag(exp[0].evalI64(c))
 			if enable {
-				sys.setGSF(flag)
+				sys.setGSFByChar(flag, c)
 			} else {
 				sys.unsetGSF(flag)
 			}
@@ -5048,7 +5048,7 @@ func (sc assertSpecial) Run(c *Char, _ []int32) bool {
 			// NoKO affects all characters in Mugen, so legacy chars do so as well
 			if c.stWgi().ikemenver[0] == 0 && c.stWgi().ikemenver[1] == 0 {
 				if enable {
-					sys.setGSF(GlobalSpecialFlag(GSF_globalnoko))
+					sys.setGSFByChar(GlobalSpecialFlag(GSF_globalnoko), c)
 				} else {
 					sys.unsetGSF(GlobalSpecialFlag(GSF_globalnoko))
 				}
@@ -13391,6 +13391,49 @@ func (sc playBgm) Run(c *Char, _ []int32) bool {
 	} else if stop {
 		sys.bgm.Stop()
 		sys.playBgmFlg = true
+	}
+	return false
+}
+
+type setStage StateControllerBase
+
+const (
+	setStage_value byte = iota
+	setStage_redirectid
+)
+
+func (sc setStage) Run(c *Char, _ []int32) bool {
+	crun := getRedirectedChar(c, StateControllerBase(sc), setStage_redirectid, "SetStage")
+	if crun == nil {
+		return false
+	}
+
+	var value string
+	StateControllerBase(sc).run(c, func(paramID byte, exp []BytecodeExp) bool {
+		if paramID == setStage_value {
+			value = exp[0].evalS()
+		}
+		return true
+	})
+	if value == "" {
+		return false
+	}
+
+	currentStageDef := ""
+	if sys.stage != nil {
+		currentStageDef = sys.stage.def
+	}
+	resolved := SearchFile(
+		value,
+		[]string{crun.gi().def, c.gi().def, currentStageDef, "", "data/"},
+		"stages/",
+	)
+	if err := sys.swapStageLive(resolved); err != nil {
+		detail := fmt.Sprintf("%s -> %s: %v", currentStageDef, value, err)
+		sys.appendToConsole(crun.warn() + "SetStage: " + detail)
+		if automationEnabled() {
+			recordAutomationEvent("stage_swap_error", detail)
+		}
 	}
 	return false
 }

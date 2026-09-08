@@ -3928,20 +3928,29 @@ func systemScriptInit(l *lua.LState) {
 		  always returns `false`.
 		@treturn string|boolean result Last key name when called without arguments, or a boolean match result when `key` is provided.
 		function getKey(key) end*/
+		key := sys.keyInput
+		if key == KeyUnknown {
+			key = peekDeferredLuaKeyInput()
+		}
 		var s string
-		if sys.keyInput != KeyUnknown {
-			s = KeyToString(sys.keyInput)
+		if key != KeyUnknown {
+			s = KeyToString(key)
 		}
 		if nilArg(l, 1) {
 			l.Push(lua.LString(s))
-			//sys.keyInput = KeyUnknown
+			if s != "" {
+				consumeDeferredLuaKeyInput(key)
+			}
 			return 1
 		} else if strArg(l, 1) == "" {
-			//sys.keyInput = KeyUnknown
 			l.Push(lua.LBool(false))
 			return 1
 		}
-		l.Push(lua.LBool(s == strArg(l, 1)))
+		matched := s == strArg(l, 1)
+		l.Push(lua.LBool(matched))
+		if matched {
+			consumeDeferredLuaKeyInput(key)
+		}
 		return 1
 	})
 	luaRegister(l, "getKeyText", func(*lua.LState) int {
@@ -4097,6 +4106,27 @@ func systemScriptInit(l *lua.LState) {
 		function getStagePreloadStatus(stageRef) end*/
 		state := sys.sel.StagePreloadStatus(int(numArg(l, 1)))
 		l.Push(lua.LString(state.String()))
+		return 1
+	})
+	luaRegister(l, "stageSpriteExists", func(l *lua.LState) int {
+		/*Check whether a preloaded stage contains a sprite.
+		@function stageSpriteExists
+		@tparam int stageRef Stage index as used by the select system.
+		@tparam int group Sprite group number.
+		@tparam int number Sprite number.
+		@treturn boolean exists True when the requested sprite is available.
+		function stageSpriteExists(stageRef, group, number) end*/
+		ref := int(numArg(l, 1))
+		group := uint16(numArg(l, 2))
+		number := uint16(numArg(l, 3))
+		exists := false
+		sys.sel.preloadMu.Lock()
+		if ref > 0 && ref <= len(sys.sel.stagelist) {
+			sff := sys.sel.stagelist[ref-1].sff
+			exists = sff != nil && sff.GetSprite(group, number) != nil
+		}
+		sys.sel.preloadMu.Unlock()
+		l.Push(lua.LBool(exists))
 		return 1
 	})
 	luaRegister(l, "getStageSelectParams", func(*lua.LState) int {
@@ -6125,6 +6155,68 @@ func systemScriptInit(l *lua.LState) {
 		if !sys.isTakingScreenshot {
 			sys.isTakingScreenshot = true
 		}
+		return 0
+	})
+	luaRegister(l, "automationScreen", func(l *lua.LState) int {
+		setAutomationScreen(strArg(l, 1))
+		return 0
+	})
+	luaRegister(l, "automationSelectionCursor", func(l *lua.LState) int {
+		setAutomationSelectionCursor(
+			int(numArg(l, 1)),
+			int(numArg(l, 2)),
+			int(numArg(l, 3)),
+			int(numArg(l, 4)),
+			int(numArg(l, 5)),
+			int(numArg(l, 6)),
+			strArg(l, 7),
+			strArg(l, 8),
+			int(numArg(l, 9)),
+			int(numArg(l, 10)),
+			boolArg(l, 11),
+			boolArg(l, 12),
+			strArg(l, 13),
+		)
+		return 0
+	})
+	luaRegister(l, "automationStageCursor", func(l *lua.LState) int {
+		setAutomationStageCursor(
+			int(numArg(l, 1)),
+			int(numArg(l, 2)),
+			strArg(l, 3),
+			strArg(l, 4),
+			boolArg(l, 5),
+			boolArg(l, 6),
+			strArg(l, 7),
+			boolArg(l, 8),
+		)
+		return 0
+	})
+	luaRegister(l, "automationPauseMenu", func(l *lua.LState) int {
+		setAutomationPauseMenu(
+			boolArg(l, 1),
+			strArg(l, 2),
+			strArg(l, 3),
+			strArg(l, 4),
+			strArg(l, 5),
+			strArg(l, 6),
+			strArg(l, 7),
+			int(numArg(l, 8)),
+			int(numArg(l, 9)),
+			boolArg(l, 10),
+			strArg(l, 11),
+			int(numArg(l, 12)),
+		)
+		return 0
+	})
+	luaRegister(l, "automationReplayMenu", func(l *lua.LState) int {
+		setAutomationReplayMenu(
+			boolArg(l, 1),
+			int(numArg(l, 2)),
+			int(numArg(l, 3)),
+			strArg(l, 4),
+			strArg(l, 5),
+		)
 		return 0
 	})
 	luaRegister(l, "searchFile", func(l *lua.LState) int {

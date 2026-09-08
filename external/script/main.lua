@@ -3051,6 +3051,20 @@ function main.f_renameReplay(item, t)
 end
 
 --replay menu
+function main.f_automationReplayMenu(active, t, item)
+	if type(automationReplayMenu) ~= 'function' then
+		return
+	end
+	local inventoryCount = math.max(0, #t - 1)
+	local selectedPath = ''
+	local selectedName = ''
+	if t[item] ~= nil and t[item].itemname ~= 'back' then
+		selectedPath = tostring(t[item].itemname or '')
+		selectedName = tostring(t[item].displayname or '')
+	end
+	automationReplayMenu(active, item, inventoryCount, selectedPath, selectedName)
+end
+
 function main.f_replay()
 	local w = main.f_menuWindow(motif.replay_info.menu)
 	textImgSetWindow(motif.replay_info.menu.item.selected.active.TextSpriteData, w[1], w[2], w[3], w[4])
@@ -3088,7 +3102,9 @@ function main.f_replay()
 	while true do
 		main.f_menuCommonDraw(t, item, cursorPosY, moveTxt, motif.replay_info, motif.replaybgdef, false)
 		cursorPosY, moveTxt, item = main.f_menuCommonCalc(t, item, cursorPosY, moveTxt, motif.replay_info, motif.replay_info.cursor)
+		main.f_automationReplayMenu(true, t, item)
 		if main.close and not fadeActive() then
+			main.f_automationReplayMenu(false, t, item)
 			bgReset(motif[main.background].BGDef)
 			fadeInInit(motif[main.group].fadein.FadeData)
 			playBgm({source = "motif.title", interrupt = true})
@@ -3110,6 +3126,7 @@ function main.f_replay()
 		elseif getInput(-1, motif[main.group].menu.done.key) then
 			main.f_waitForPreloads(true)
 			sndPlay(motif.Snd, motif[main.group].cursor.done.snd.default[1], motif[main.group].cursor.done.snd.default[2])
+			main.f_automationReplayMenu(false, t, item)
 			if enterReplay(t[item].itemname) and synchronize() then
 				main.replayActive = true
 				enterSyncedNetplayMenu()
