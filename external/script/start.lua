@@ -22,6 +22,15 @@ local timerSelect = 0
 local cursorActive = {}
 local cursorDone = {}
 
+-- Raw, layout-independent confirmation keys used only by the automation
+-- overlay. Player 1 uses Return; player 2 uses numpad Enter.
+local function automationConfirm(side)
+	if side == 1 then
+		return getKey() == 'RETURN'
+	end
+	return getKey() == 'KP_ENTER'
+end
+
 --;===========================================================
 --; COMMON FUNCTIONS
 --;===========================================================
@@ -1621,7 +1630,7 @@ function start.f_slotSelected(cell, side, cmd, player, x, y)
 		end
 	end
 	-- returns true on pressed key if current slot is not blocked by TeamDuplicates feature
-	return main.f_btnPalNo(cmd) > 0 and (not t_reservedChars[side][start.t_grid[y + 1][x + 1].char_ref] or start.t_grid[start.c[player].selY + 1][start.c[player].selX + 1].char == 'randomselect'),false
+	return (main.f_btnPalNo(cmd) > 0 or automationConfirm(side)) and (not t_reservedChars[side][start.t_grid[y + 1][x + 1].char_ref] or start.t_grid[start.c[player].selY + 1][start.c[player].selX + 1].char == 'randomselect'),false
 end
 
 --generate start.t_grid table, assign row and cell to main.t_selChars
@@ -2660,13 +2669,44 @@ local function tickScreenDelay(side)
 				table.insert(owners, cmd)
 			end
 		end
-		if #owners > 0 and getInput(owners, motif.select_info.done.key) then
+		if #owners > 0 and (getInput(owners, motif.select_info.done.key) or automationConfirm(side)) then
 			start.p[side].screenDelay = 0
 			return true
 		end
 	end
 	start.p[side].screenDelay = start.p[side].screenDelay - 1
 	return false
+end
+
+function start.f_automationTeamMenuState(t_teamMenu)
+	local parts = {'team_menu'}
+	for side = 1, 2 do
+		local item = t_teamMenu[side][start.p[side].teamMenu]
+		local mode = 'none'
+		local size = 0
+		if item ~= nil then
+			mode = item.itemname
+			if mode == 'single' then
+				size = 1
+			elseif mode == 'simul' then
+				size = start.p[side].numSimul
+			elseif mode == 'turns' then
+				size = start.p[side].numTurns
+			elseif mode == 'tag' then
+				size = start.p[side].numTag
+			else
+				size = start.p[side].numChars
+			end
+		end
+		table.insert(parts, 'p' .. tostring(side))
+		table.insert(parts, 'mode')
+		table.insert(parts, tostring(mode))
+		table.insert(parts, 'size')
+		table.insert(parts, tostring(size))
+		table.insert(parts, 'done')
+		table.insert(parts, start.p[side].teamEnd and '1' or '0')
+	end
+	main.f_automationUiLog(table.concat(parts, ':'))
 end
 
 -- Reset stage portrait animation data
@@ -2684,6 +2724,7 @@ end
 
 start.needUpdateDrawList = false
 function start.f_selectScreen()
+	main.f_automationUiLog('select_screen')
 	if (not main.selectMenu[1] and not main.selectMenu[2]) or selScreenEnd then
 		return true
 	end
@@ -2884,6 +2925,66 @@ function start.f_selectScreen()
 				end
 			end
 		end
+		if not start.p[1].teamEnd or not start.p[2].teamEnd then
+			start.f_automationTeamMenuState(t_teamMenu)
+		end
+		local selectionActive = false
+		for side = 1, 2 do
+			if start.p[side].teamEnd and not start.p[side].selEnd and #start.p[side].t_selCmd > 0 then
+				selectionActive = true
+				local player = start.p[side].t_selCmd[1].player
+				local cursor = start.c[player]
+				local charData = start.f_selGrid(cursor.cell + 1)
+				local reference = -1
+				local definition = ''
+				local name = ''
+				local preloadStatus = 'idle'
+				if charData ~= nil then
+					reference = charData.char_ref or -1
+					definition = charData.char or ''
+					if reference >= 0 then
+						name = start.f_getName(reference, side) or ''
+						preloadStatus = getCharPreloadStatus(reference)
+					end
+				end
+				if type(automationSelectionCursor) == 'function' then
+					automationSelectionCursor(
+						side,
+						player,
+						cursor.selX,
+						cursor.selY,
+						cursor.cell,
+						reference,
+						definition,
+						name,
+						#start.p[side].t_selected,
+						start.p[side].numChars,
+						start.p[side].inPalMenu,
+						true,
+						preloadStatus
+					)
+				end
+			elseif start.p[side].teamEnd and start.p[side].selEnd and type(automationSelectionCursor) == 'function' then
+				automationSelectionCursor(
+					side,
+					0,
+					0,
+					0,
+					-1,
+					-1,
+					'',
+					'',
+					main.f_tableLength(start.p[side].t_selected),
+					start.p[side].numChars,
+					false,
+					false,
+					'ready'
+				)
+			end
+		end
+		if selectionActive and start.p[1].teamEnd and start.p[2].teamEnd then
+			main.f_automationUiLog('select_screen')
+		end
 		--exit select screen
 		for side = 1, 2 do
 			for _, v in ipairs(start.p[side].t_selCmd) do
@@ -2981,6 +3082,7 @@ function start.f_selectScreen()
 							sndPlay(motif.Snd, motif.select_info.stage.done.snd[1], motif.select_info.stage.done.snd[2])
 							stageTextData = motif.select_info.stage.done.TextSpriteData
 							stageEnd = true
+							start.f_automationStageCursor(false)
 						end
 					elseif stageActiveCount < motif.select_info.stage.active.switchtime then --delay change
 						stageActiveCount = stageActiveCount + 1
@@ -3239,7 +3341,7 @@ function start.f_teamMenu(side, t)
 			end
 		end
 		--Confirmed team selection
-		if getInput(t_cmd, motif.select_info['p' .. side].teammenu.done.key) or timerSelect == -1 then
+		if getInput(t_cmd, motif.select_info['p' .. side].teammenu.done.key) or automationConfirm(side) or timerSelect == -1 then
 			timerSelect = motif.select_info.timer.displaytime
 			start.p[1].screenDelay, start.p[2].screenDelay = 0, 0
 			sndPlay(motif.Snd, motif.select_info['p' .. side].teammenu.done.snd[1], motif.select_info['p' .. side].teammenu.done.snd[2])
@@ -3437,7 +3539,7 @@ function start.f_palMenu(side, cmd, player, member, selectState)
 
 	-- accept selection
 	local autoConfirm = #validPals <= 1
-	if autoConfirm or getInput(cmd, motif.select_info['p' .. side].palmenu.done.key) or timerSelect == -1 then
+	if autoConfirm or getInput(cmd, motif.select_info['p' .. side].palmenu.done.key) or automationConfirm(side) or timerSelect == -1 then
 		-- TODO: There's an issue here where when the palette is selected there will be 1 frame without any cursor
 		-- Since the "done" cursor only appears in the next frame
 		pal = (curIdx == maxIdx) and (start.c[player].randPalPreview or start.f_randomPal(charRef, validPals)) or validPals[curIdx]
@@ -3860,7 +3962,39 @@ end
 --;===========================================================
 --; STAGE MENU
 --;===========================================================
+function start.f_automationStageCursor(active)
+	if type(automationStageCursor) ~= 'function' then
+		return
+	end
+	local reference = -1
+	local definition = ''
+	local name = 'Random'
+	local preloadStatus = 'ready'
+	local portraitAvailable = true
+	if stageListNo > 0 then
+		reference = main.t_selectableStages[stageListNo]
+		local stageData = main.t_selStages[reference]
+		if stageData ~= nil then
+			definition = stageData.def or ''
+			name = stageData.name or ''
+		end
+		preloadStatus = getStagePreloadStatus(reference)
+		portraitAvailable = stageSpriteExists(reference, 9000, 1)
+	end
+	automationStageCursor(
+		stageListNo,
+		reference,
+		definition,
+		name,
+		stageListNo == 0,
+		active,
+		preloadStatus,
+		portraitAvailable
+	)
+end
+
 function start.f_stageMenu()
+	main.f_automationUiLog('stage_menu')
 	local n = stageListNo
 	local randomMode = {
 		[0] = { init = 1, min = 1 }, -- disabled
@@ -3901,6 +4035,7 @@ function start.f_stageMenu()
 	if stageListNo > 0 then
 		main.f_preloadBoostStage(main.t_selectableStages[stageListNo])
 	end
+	start.f_automationStageCursor(true)
 end
 
 --;===========================================================
@@ -3982,6 +4117,7 @@ function start.f_buildOverrideParams(side, member, v)
 end
 
 function start.f_selectVersus(active, t_orderSelect, loadStartArg)
+	main.f_automationUiLog('versus_screen')
 	start.t_orderRemap = {{}, {}}
 	start.bgLoadStarted = false
 	for side = 1, 2 do
@@ -4370,6 +4506,7 @@ end
 
 --loading loop called after versus screen is finished
 function start.f_selectLoading(arg)
+	main.f_automationUiLog('loading')
 	clearAllSound()
 	local t = {}
 	if type(arg) == "table" then

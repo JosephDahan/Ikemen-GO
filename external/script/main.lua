@@ -1,4 +1,15 @@
 main = {}
+local automationUiLast = ''
+
+function main.f_automationUiLog(state)
+	if state == automationUiLast then
+		return
+	end
+	automationUiLast = state
+	if type(automationScreen) == 'function' then
+		automationScreen(state)
+	end
+end
 --;===========================================================
 --; INITIALIZE DATA
 --;===========================================================
@@ -1798,6 +1809,8 @@ function main.f_storyboard(path)
 	if s == nil then
 		return false
 	end
+	local automationStoryboardPath = tostring(path):gsub('\\', '/')
+	main.f_automationUiLog('storyboard:' .. automationStoryboardPath)
 	if gameOption('Debug.DumpLuaTables') then
 		-- get filename without extension from full path
 		local name = path:match("([^/\\]+)$") or "unknown" -- last path segment
@@ -1811,6 +1824,7 @@ function main.f_storyboard(path)
 		main.f_preloadTick(2)
 		refresh()
 	end
+	main.f_automationUiLog('storyboard_done:' .. automationStoryboardPath)
 	return storyboardCanceled()
 end
 
@@ -2643,6 +2657,13 @@ end
 function main.f_createMenu(tbl, bool_bgreset, bool_main, bool_f1, bool_del)
 	return function()
 		hook.run("main.menu.loop")
+		-- Screenpacks use different private names for their root menu (for
+		-- example "main_menu" and "mode_select"). Expose one stable semantic
+		-- identity to native-control clients while preserving submenu names.
+		local automationMenuName = 'mode_select'
+		if not bool_main then
+			automationMenuName = tostring(tbl.name or tbl.title or main.group or 'unknown'):gsub('%s+', '_'):lower()
+		end
 		local cursorPosY = 1
 		local moveTxt = 0
 		local item = 1
@@ -2712,6 +2733,7 @@ function main.f_createMenu(tbl, bool_bgreset, bool_main, bool_f1, bool_del)
 				end
 				local item_sav = item
 				cursorPosY, moveTxt, item = main.f_menuCommonCalc(t, item, cursorPosY, moveTxt, motif[main.group], motif[main.group].cursor)
+				main.f_automationUiLog('menu:' .. automationMenuName .. ':item:' .. tostring(t[item].itemname))
 				textImgSetText(motif[main.group].title.TextSpriteData, tbl.title)
 				if item_sav ~= item then
 					demoFrameCounter = 0
@@ -2772,9 +2794,10 @@ function main.f_createMenu(tbl, bool_bgreset, bool_main, bool_f1, bool_del)
 					tbl.items = main.f_deleteIP(item, t)
 				elseif main.f_hiscoreDisplay(t[item].itemname) then
 					demoFrameCounter = 0
-				elseif getInput(-1, motif[main.group].menu.done.key) then
+				elseif getInput(-1, motif[main.group].menu.done.key) or getKey() == 'RETURN' then
 					demoFrameCounter = 0
 					local f = t[item].itemname
+					main.f_automationUiLog('menu_action:' .. tostring(f))
 					if f == 'back' then
 						sndPlay(motif.Snd, motif[main.group].cancel.snd[1], motif[main.group].cancel.snd[2])
 						break

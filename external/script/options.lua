@@ -1326,6 +1326,13 @@ options.t_itemname = {
 	end,
 }
 
+local function f_nativeOptionToken(value)
+	return tostring(value or '')
+		:gsub('[^%w_ .%%+%-]', '?')
+		:gsub('%s+', '_')
+		:lower()
+end
+
 -- Shared menu loop logic
 function options.f_createMenu(tbl, bool_main)
 	return function()
@@ -1357,6 +1364,14 @@ function options.f_createMenu(tbl, bool_main)
 				cursorPosY, moveTxt, item = main.f_menuCommonCalc(t, item, cursorPosY, moveTxt, motif.option_info, motif.option_info.cursor)
 				textImgReset(motif.option_info.title.TextSpriteData)
 				textImgSetText(motif.option_info.title.TextSpriteData, tbl.title)
+				if type(main.f_automationUiLog) == 'function' and t[item] ~= nil then
+					local menuName = bool_main and 'options' or tbl.name or tbl.title or 'submenu'
+					main.f_automationUiLog(
+						'options:' .. f_nativeOptionToken(menuName) ..
+						':item:' .. f_nativeOptionToken(t[item].itemname) ..
+						':value:' .. f_nativeOptionToken(t[item].vardisplay)
+					)
+				end
 				if main.close then
 					bgReset(motif[main.background].BGDef)
 					fadeInInit(motif[main.group].fadein.FadeData)

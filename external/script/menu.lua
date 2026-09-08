@@ -88,6 +88,51 @@ function menu.f_valueChanged(t, sec)
 	return false, nil
 end
 
+function menu.f_automationPauseMenu(tbl, special)
+	if type(automationPauseMenu) ~= 'function' then
+		return
+	end
+	local root = tostring(menu.currentMenuId or '')
+	local menuName = tostring(tbl.name or root)
+	local item = ''
+	local value = ''
+	if type(tbl.items) == 'table' and tbl.items[tbl.item] ~= nil then
+		item = tostring(tbl.items[tbl.item].itemname or '')
+		value = tostring(menu.f_vardisplay(item) or '')
+	end
+	local movelistCharacter = ''
+	local movelistIndex = 0
+	local movelistLine = 0
+	local movelistText = ''
+	local movelistAvailable = false
+	local movelistEntries = 0
+	if special == 'commandlist' and menu.t_movelists ~= nil and menu.t_movelists[menu.movelistChar] ~= nil then
+		local movelist = menu.t_movelists[menu.movelistChar]
+		movelistCharacter = tostring(movelist.name or '')
+		movelistIndex = menu.movelistChar
+		movelistLine = tonumber(movelist.tbl.movelistLine or 1) or 1
+		movelistText = tostring(movelist.tbl.movelistText or '')
+		movelistAvailable = movelistText ~= ''
+		if type(movelist.commandlist) == 'table' then
+			movelistEntries = #movelist.commandlist
+		end
+	end
+	automationPauseMenu(
+		true,
+		root,
+		menuName,
+		item,
+		value,
+		tostring(special or ''),
+		movelistCharacter,
+		movelistIndex,
+		movelistLine,
+		movelistAvailable,
+		movelistText,
+		movelistEntries
+	)
+end
+
 -- Current pause menu itemname for internal use (key from menu.t_itemname table)
 menu.itemname = ''
 
@@ -287,6 +332,7 @@ function menu.f_createMenu(tbl, sec, bg, bool_main)
 		else
 			main.f_menuCommonDraw(t, tbl.item, tbl.cursorPosY, tbl.moveTxt, sec, bg, true)
 		end
+		menu.f_automationPauseMenu(tbl, '')
 		-- Draw during fades, but don't accept menu input until they finish.
 		if not main.pauseMenuActive or fadeActive() or menu.pauseExitDelay >= 0 then
 			return
@@ -629,6 +675,9 @@ function menu.f_run()
 	end
 	--Button Config
 	if menu.itemname == 'keyboard' or menu.itemname == 'gamepad' then
+		if menu[menu.currentMenuId] ~= nil then
+			menu.f_automationPauseMenu(menu[menu.currentMenuId], menu.itemname)
+		end
 		if menu.itemname == 'keyboard' then
 			options.f_keyCfg('Keys', menu.itemname, bg, true)
 		else
@@ -636,6 +685,9 @@ function menu.f_run()
 		end
 	--Command List
 	elseif menu.itemname == 'commandlist' then
+		if menu[menu.currentMenuId] ~= nil then
+			menu.f_automationPauseMenu(menu[menu.currentMenuId], 'commandlist')
+		end
 		menu.f_commandlistRender(sec, menu.t_movelists[menu.movelistChar])
 	--Menu
 	else
@@ -644,6 +696,9 @@ function menu.f_run()
 	local active = main.pauseMenuActive
 	if not active then
 		menu.pauseExitDelay = -1
+		if type(automationPauseMenu) == 'function' then
+			automationPauseMenu(false, '', '', '', '', '', '', 0, 0, false, '', 0)
+		end
 	end
 	return active
 end
